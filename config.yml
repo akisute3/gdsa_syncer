@@ -1,0 +1,9 @@
+Gitadora:
+  id: KONAMI_ID
+  password: KONAMI_PASSWORD
+GDSA:
+  id: GDSA_ID
+  password: GDSA_PASSWORD
+Config:
+  sync_guitar: true
+  sync_drum: true
