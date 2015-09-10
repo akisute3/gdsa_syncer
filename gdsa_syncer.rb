@@ -24,6 +24,7 @@ module Crawler
 
     CRAWL_DELAY = 3
     SEPARATOR = '.'
+    GTYPES = {guitar: 'gf', drum: 'dm'}
     DIFFICULTY_ABBREVS = {'BASIC' => 'BSC', 'ADVANCED' => 'ADV', 'EXTREME' => 'EXT', 'MASTER' => 'MAS'}
 
     def initialize
@@ -38,76 +39,78 @@ module Crawler
     end
 
     def login
-      visit('/gate/p/login.html?path=%2Fgame%2Fgfdm%2Fgitadora%2Fp%2Fcont%2Fplay_data_tb%2Fmusic.html')
+      visit('/gate/p/login.html')
       config = YAML.load_file('config.yml')
       fill_in 'KID', with: config['Gitadora']['id']
       fill_in 'pass', with: config['Gitadora']['password']
       click_button '規約に同意してログイン'
     end
 
-    # game: 'GuitarFreaks' or 'DrumMania'
+    # game は :drum か :guitar
     def view(game, category)
-      visit('/game/gfdm/gitadora/p/cont/play_data_tb/music.html')
+      gtype = GTYPES[game]
+      visit("/game/gfdm/gitadora_tb/p/eam/playdata/music.html?gtype=#{gtype}")
 
-      click_link(game)
       select category, from: 'cat'
       click_button '表示'
     end
 
-    def crawl
+    def crawl(game)
       links = page.all('a.text_link').map {|a| a[:href] }
       links.each do |url|
+        sleep CRAWL_DELAY
+
         visit(url)
 
-        # 各難易度の達成率の収集
-        # (ドラム: {"BASIC": 85.03, ...},  ギター: {"GUITAR.BASIC": 72.65, ..., "BASE.BASIC": 91.12, ...})
         title = page.find('.live_title').text.tr('！', '!')
-        difficulties = page.all('.index_md_tb').map {|div| div.all('font').map{|f| f.text }.reject{|s| s.empty? }.join(SEPARATOR) }
-        achievements = page.all('.md').map {|div| div.all('tbody tr')[3].all('td')[1].text.to_f }
-        results = Hash[difficulties.zip achievements].reject {|k,v| v.zero? }
-
         print "  #{title}: "
 
-        # 各曲のスキル対象の決定
-        achievements = {}
-        results.each do |k, v|
-          if k.index(SEPARATOR)
-            split = k.split(SEPARATOR)
-            game = split[0]
-            difficulty = split[1]
-          else
-            game = 'Drum'
-            difficulty = k
-          end
-
-          game.capitalize!
-          difficulty = DIFFICULTY_ABBREVS[difficulty]
-
-          # 全曲リストに登録されているか確認
-          unless defined? @levels[title][game][difficulty]
-            achievements = {}
-            print '曲もしくは難易度が GDSA に登録されていません。'
-            break
-          end
-
-          achievements["#{game}#{SEPARATOR}#{difficulty}"] = v
+        # 達成率、レベル、難易度をそれぞれ収集して配列作成 (同じインデックスどうしで対応する)
+        tables = page.all('.md')
+        achievements = tables.map {|div| div.all('tbody tr')[3].all('td')[1].text.to_f }
+        if achievements.all? {|f| f.zero? }
+          puts '1 度もプレイしていないためスキップしました。'
+          next
         end
 
-        # スキルが最大のもののみ extracted に登録
-        mk, mv = achievements.max_by do |k,v|
-          game, difficulty = k.split(SEPARATOR)
-          point(v, @levels[title][game][difficulty])
+        levels = page.all('.diff_area').map {|l| l.text.to_f }
+        difficulties = tables.map{|div| div.first('thead tr th')[:class] }.map{|str| str.slice!('diff_'); str }
+        if game == :guitar
+          current_prefix = 'GUITAR'
+          prefixes = [current_prefix]
+          difficulties.each_cons(2) do |a, b|
+            current_prefix = 'BASS' if DIFFICULTY_ABBREVS.keys.index(a) > DIFFICULTY_ABBREVS.keys.index(b)
+            prefixes << current_prefix
+          end
+
+          diffs = []
+          prefixes.zip(difficulties) {|a| diffs << a.join(SEPARATOR) }
+          difficulties = diffs
         end
 
-        if mk.nil?
-          puts 'スキップしました。'
+        # スキル対象のレベルの決定
+        si = levels.zip(achievements).map {|a, b| a * b }.each_with_index.max[1]
+        sd = difficulties[si]
+        if sd.index(SEPARATOR)
+          split = sd.split(SEPARATOR)
+          game = split[0]
+          difficulty = split[1]
         else
-          game, difficulty = mk.split('.')
-          @gdsa.register(title, game, difficulty, achievements[mk])
-          puts "#{game}(#{difficulty}) に達成率 #{achievements[mk]} % を登録しました。"
+          game = 'Drum'
+          difficulty = sd
         end
 
-        sleep CRAWL_DELAY
+        game.capitalize!
+        difficulty = DIFFICULTY_ABBREVS[difficulty]
+
+        # 全曲リストに登録されているか確認
+        unless defined? @levels[title][game][difficulty]
+          puts '曲もしくは難易度が GDSA に登録されていないためスキップしました。'
+          next
+        end
+
+        @gdsa.register(title, game, difficulty, achievements[si])
+        puts "#{game}(#{difficulty}) に達成率 #{achievements[si]} % を登録しました。"
       end
     end
 
@@ -144,7 +147,7 @@ module Crawler
 end
 
 
-GAMES = ['GuitarFreaks', 'DrumMania']
+GAMES = [:guitar, :drum]
 CATEGORIES = ['数字・記号'] +
              ('A'..'Z').to_a +
              %w(あ か さ た な は ま や ら わ).map {|s| s + '行' }
@@ -154,12 +157,12 @@ config = YAML.load_file('config.yml')
 
 crawler = Crawler::Gitadora.new
 GAMES.each do |game|
-  next if game == 'GuitarFreaks' and not config['Config']['sync_guitar']
-  next if game == 'DrumMania' and not config['Config']['sync_drum']
+  next if game == :guitar and not config['Config']['sync_guitar']
+  next if game == :drum and not config['Config']['sync_drum']
 
   puts "[#{game}]"
   CATEGORIES.each do |category|
     crawler.view(game, category)
-    crawler.crawl
+    crawler.crawl(game)
   end
 end
